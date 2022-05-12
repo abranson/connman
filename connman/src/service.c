@@ -8979,6 +8979,21 @@ void connman_service_create_ip6config(struct connman_service *service,
 }
 
 /**
+ * connman_service_get_network:
+ * @service: service structure
+ *
+ * Get network of the service
+ */
+struct connman_network *connman_service_get_network(
+						struct connman_service *service)
+{
+	if (!service)
+		return NULL;
+
+	return service->network;
+}
+
+/**
  * connman_service_lookup_from_network:
  * @network: network structure
  *
