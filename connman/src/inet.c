@@ -257,6 +257,11 @@ out:
 	return ret;
 }
 
+bool connman_inet_is_any_addr(const char *address, int family)
+{
+	return __connman_inet_is_any_addr(address, family);
+}
+
 int connman_inet_ifindex(const char *name)
 {
 	struct ifreq ifr;
@@ -664,7 +669,8 @@ out:
 }
 
 int connman_inet_del_ipv6_network_route(int index, const char *host,
-						unsigned char prefix_len)
+						unsigned char prefix_len,
+						short metric)
 {
 	struct in6_rtmsg rt;
 	int sk, err = 0;
@@ -685,7 +691,7 @@ int connman_inet_del_ipv6_network_route(int index, const char *host,
 
 	rt.rtmsg_flags = RTF_UP | RTF_HOST;
 
-	rt.rtmsg_metric = 1;
+	rt.rtmsg_metric = metric;
 	rt.rtmsg_ifindex = index;
 
 	sk = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -709,12 +715,13 @@ out:
 
 int connman_inet_del_ipv6_host_route(int index, const char *host)
 {
-	return connman_inet_del_ipv6_network_route(index, host, 128);
+	return connman_inet_del_ipv6_network_route(index, host, 128, 1);
 }
 
 int connman_inet_add_ipv6_network_route(int index, const char *host,
 					const char *gateway,
-					unsigned char prefix_len)
+					unsigned char prefix_len,
+					short metric)
 {
 	struct in6_rtmsg rt;
 	int sk, err = 0;
@@ -747,7 +754,7 @@ int connman_inet_add_ipv6_network_route(int index, const char *host,
 		inet_pton(AF_INET6, gateway, &rt.rtmsg_gateway) > 0)
 		rt.rtmsg_flags |= RTF_GATEWAY;
 
-	rt.rtmsg_metric = 1;
+	rt.rtmsg_metric = metric;
 	rt.rtmsg_ifindex = index;
 
 	sk = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -772,7 +779,7 @@ out:
 int connman_inet_add_ipv6_host_route(int index, const char *host,
 					const char *gateway)
 {
-	return connman_inet_add_ipv6_network_route(index, host, gateway, 128);
+	return connman_inet_add_ipv6_network_route(index, host, gateway, 128, 1);
 }
 
 int connman_inet_clear_ipv6_gateway_address(int index, const char *gateway)
