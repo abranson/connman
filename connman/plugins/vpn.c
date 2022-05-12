@@ -1527,11 +1527,12 @@ static void set_route(struct connection_data *data, struct vpn_route *route)
 
 	if (route->family == AF_INET6) {
 		unsigned char prefix_len = atoi(route->netmask);
+		short metric = 1; // Lowest metric for VPNs
 
 		connman_inet_add_ipv6_network_route(data->index,
 							route->network,
 							route->gateway,
-							prefix_len);
+							prefix_len, metric);
 	} else {
 		connman_inet_add_network_route(data->index, route->network,
 						route->gateway,
