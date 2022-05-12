@@ -47,16 +47,24 @@ void connman_rtnl_remove_watch(unsigned int id);
 struct connman_rtnl {
 	const char *name;
 	int priority;
+	bool handle_rtprot_ra;
 	void (*newlink) (unsigned short type, int index,
 					unsigned flags, unsigned change);
 	void (*dellink) (unsigned short type, int index,
 					unsigned flags, unsigned change);
 	void (*newgateway) (int index, const char *gateway);
 	void (*delgateway) (int index, const char *gateway);
+	void (*newgateway6) (int index, const char *dst, const char *gateway,
+					int metric);
+	void (*delgateway6) (int index, const char *dst, const char *gateway,
+					int metric);
 };
 
 int connman_rtnl_register(struct connman_rtnl *rtnl);
 void connman_rtnl_unregister(struct connman_rtnl *rtnl);
+
+void connman_rtnl_handle_rtprot_ra(bool value);
+int connman_rtnl_request_route_update(void);
 
 #ifdef __cplusplus
 }
