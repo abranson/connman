@@ -67,6 +67,7 @@ static unsigned int watch_id = 0;
 static GSList *update_list = NULL;
 static guint update_interval = G_MAXUINT;
 static guint update_timeout = 0;
+static bool handle_rtprot_ra = false;
 
 struct interface_data {
 	int index;
@@ -365,6 +366,17 @@ void connman_rtnl_unregister(struct connman_rtnl *rtnl)
 	DBG("rtnl %p name %s", rtnl, rtnl->name);
 
 	rtnl_list = g_slist_remove(rtnl_list, rtnl);
+}
+
+/**
+ * connman_rtnl_handle_rtprot_ra:
+ * @value true to also notify RTPROT_RA gateways
+ *
+ * Toggle notify about RTPROT_RA gateways added by route advertisement
+ */
+void connman_rtnl_handle_rtprot_ra(bool value)
+{
+	handle_rtprot_ra = value;
 }
 
 static const char *operstate2str(unsigned char operstate)
@@ -796,6 +808,19 @@ static void process_newroute(unsigned char family, unsigned char scope,
 
 		if (rtnl->newgateway)
 			rtnl->newgateway(index, gatewaystr);
+
+		if (family == AF_INET6 && rtnl->newgateway6) {
+			/* This listener does not handle gw added via ra */
+			if (msg->rtm_protocol == RTPROT_RA &&
+							!rtnl->handle_rtprot_ra)
+				continue;
+
+			/*
+			 * TODO: convert msg to struct in6_rtmsg and
+			 * get route metric.
+			 */
+			rtnl->newgateway6(index, dststr, gatewaystr, 1024);
+		}
 	}
 }
 
@@ -853,6 +878,19 @@ static void process_delroute(unsigned char family, unsigned char scope,
 
 		if (rtnl->delgateway)
 			rtnl->delgateway(index, gatewaystr);
+
+		if (family == AF_INET6 && rtnl->delgateway6) {
+			/* This listener does not handle gw added via ra */
+			if (msg->rtm_protocol == RTPROT_RA &&
+							!rtnl->handle_rtprot_ra)
+				continue;
+
+			/*
+			 * TODO: convert msg to struct in6_rtmsg and
+			 * get route metric.
+			 */
+			rtnl->delgateway6(index, dststr, gatewaystr, 1024);
+		}
 	}
 }
 
@@ -1126,8 +1164,13 @@ static bool is_route_rtmsg(struct rtmsg *msg)
 		return false;
 
 	if (msg->rtm_protocol != RTPROT_BOOT &&
-			msg->rtm_protocol != RTPROT_KERNEL)
+					msg->rtm_protocol != RTPROT_KERNEL) {
+
+		if (handle_rtprot_ra && msg->rtm_protocol == RTPROT_RA)
+			return true;
+
 		return false;
+	}
 
 	if (msg->rtm_type != RTN_UNICAST)
 		return false;
@@ -1626,6 +1669,11 @@ unsigned int __connman_rtnl_update_interval_remove(unsigned int interval)
 int __connman_rtnl_request_update(void)
 {
 	return send_getlink();
+}
+
+int connman_rtnl_request_route_update(void)
+{
+	return send_getroute();
 }
 
 int __connman_rtnl_init(void)
