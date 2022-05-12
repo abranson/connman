@@ -35,6 +35,7 @@
 #include <connman/plugin.h>
 #include <connman/device.h>
 #include <connman/network.h>
+#include <connman/service.h>
 #include <connman/inet.h>
 #include <connman/dbus.h>
 #include <connman/log.h>
@@ -136,6 +137,121 @@ struct plugin_data {
 	gulong mm_handler_id[MM_HANDLER_COUNT];
 	gulong manager_handler_id[MANAGER_HANDLER_COUNT];
 };
+
+struct rtnl_gw {
+	int index;
+	char *dst;
+	char *gw;
+	int metric;
+};
+
+static GSList *rtnl_gw_list = NULL;
+
+static void free_rtnl_gw(gpointer data)
+{
+	struct rtnl_gw *item = data;
+
+	g_free(item->dst);
+	g_free(item->gw);
+	g_free(item);
+}
+
+static gint route_compare(gconstpointer a, gconstpointer b)
+{
+	const struct rtnl_gw *route_a = a;
+	const struct rtnl_gw *route_b = b;
+
+	if(route_a->index == route_b->index &&
+				!g_strcmp0(route_a->dst, route_b->dst) &&
+				!g_strcmp0(route_a->gw, route_b->gw) &&
+				route_a->metric == route_b->metric)
+		return 0;
+
+	return -1;
+}
+
+static void add_gateway_to_rtnl_list(int index, const char *dst,
+						const char *gw, int metric)
+{
+	struct rtnl_gw *item;
+
+	DBG("%d %s %s %d", index, dst, gw, metric);
+
+	item = g_try_new0(struct rtnl_gw, 1);
+	if (!item)
+		return;
+
+	item->index = index;
+	item->dst = g_strdup(dst);
+	item->gw = g_strdup(gw);
+	item->metric = metric;
+
+	if (g_slist_find_custom(rtnl_gw_list, item, route_compare)) {
+		free_rtnl_gw(item);
+		DBG("already in list");
+		return;
+	}
+
+	rtnl_gw_list = g_slist_prepend(rtnl_gw_list, item);
+	DBG("added");
+}
+
+static void del_gateway_from_rtnl_list(int index, const char *dst,
+						const char *gw, int metric)
+{
+	struct rtnl_gw *item;
+	GSList *iter;
+
+	DBG("%d %s %s %d", index, dst, gw, metric);
+
+	if (!rtnl_gw_list)
+		return;
+
+	for (iter = rtnl_gw_list; iter; iter = iter->next) {
+		item = iter->data;
+		if(item->index == index && !g_strcmp0(item->dst, dst) &&
+						!g_strcmp0(item->gw, gw) &&
+						item->metric == metric) {
+			rtnl_gw_list = g_slist_remove_link(rtnl_gw_list, iter);
+			free_rtnl_gw(item);
+			g_slist_free_1(iter);
+
+			DBG("deleted");
+			return;
+		}
+	}
+}
+
+static void handle_rtnl_gw(gpointer data, gpointer user_data)
+{
+	struct rtnl_gw *item = data;
+	int index = GPOINTER_TO_INT(user_data);
+	int err;
+
+	/* Delete all gateways that are not for the current interface */
+	if (item->index == index)
+		return;
+
+	DBG("deleting %d %s %s %d", item->index, item->dst, item->gw,
+								item->metric);
+
+	/* Interested only in default gw routes that have no prefix */
+	err = connman_inet_del_ipv6_network_route(item->index, item->dst, 0,
+								item->metric);
+	if (err)
+		connman_warn("Cannot delete excess IPv6 network (%d %s %s %d)",
+							item->index, item->dst,
+							item->gw, item->metric);
+}
+
+static void handle_gateway_rtnl_list(int index)
+{
+	DBG("");
+
+	g_slist_foreach(rtnl_gw_list, handle_rtnl_gw, GINT_TO_POINTER(index));
+	g_slist_free_full(rtnl_gw_list, free_rtnl_gw);
+	rtnl_gw_list = NULL;
+}
 
 static void connctx_update_active(struct modem_data *md);
 static void modem_update_network(struct modem_data *md);
@@ -744,6 +860,7 @@ static void modem_connected(struct modem_data *md)
 	if (index >= 0) {
 		connman_network_set_index(md->network, index);
 		modem_set_connected(md);
+		handle_gateway_rtnl_list(index);
 	}
 }
 
@@ -1333,6 +1450,71 @@ static struct connman_technology_driver ofono_tech_driver = {
 	.set_offline    = ofono_tech_set_offline
 };
 
+static void ofono_newgateway(int index, const char *dst, const char *gateway,
+								int metric)
+{
+	struct connman_service *service;
+	struct connman_network *network;
+	char *ifname;
+	int service_index;
+	int err;
+
+	ifname = connman_inet_ifname(index);
+	DBG("%d/%s dst %s gateway %s metric %d", index, ifname, dst, gateway,
+									metric);
+
+	if (!ifname || strncmp("rmnet_data", ifname, 10) ||
+				!connman_inet_is_any_addr(dst, AF_INET6))
+		goto out;
+
+	service = connman_service_get_default();
+	if (connman_service_get_type(service) != CONNMAN_SERVICE_TYPE_CELLULAR)
+		goto add;
+
+	network = connman_service_get_network(service);
+	if (!network || !connman_network_get_connected(network))
+		goto add;
+
+	service_index = connman_network_get_index(network);
+	if (service_index == index)
+		goto out; /* do nothing for connected gw */
+
+	DBG("clear default gateway route");
+
+	err = connman_inet_del_ipv6_network_route(index, dst, 0, metric);
+	if (err)
+		connman_warn("Cannot delete default route from %d", index);
+
+	goto out;
+
+add:
+	add_gateway_to_rtnl_list(index, dst, gateway, metric);
+
+out:
+	g_free(ifname);
+}
+
+static void ofono_delgateway(int index, const char *dst, const char *gateway,
+								int metric)
+{
+	char *ifname = connman_inet_ifname(index);
+
+	DBG("%d/%s %s", index, ifname, gateway);
+
+	if (ifname && !strncmp("rmnet_data", ifname, 10) &&
+				connman_inet_is_any_addr(dst, AF_INET6))
+		del_gateway_from_rtnl_list(index, dst, gateway, metric);
+
+	g_free(ifname);
+}
+
+static struct connman_rtnl ofono_rtnl = {
+	.name			= "ofono",
+	.handle_rtprot_ra	= true,
+	.newgateway6		= ofono_newgateway,
+	.delgateway6		= ofono_delgateway,
+};
+
 static int sailfish_ofono_init(void)
 {
 	int err;
@@ -1358,6 +1540,15 @@ static int sailfish_ofono_init(void)
 			if (!err) {
 				GASSERT(!ofono_plugin);
 				ofono_plugin = ofono_plugin_new();
+
+				err = connman_rtnl_register(&ofono_rtnl);
+				if (err < 0) {
+					connman_error("RTLN listener failed");
+				} else {
+					connman_rtnl_handle_rtprot_ra(true);
+					connman_rtnl_request_route_update();
+				}
+
 				DBG("ok");
 				return 0;
 			}
@@ -1380,6 +1571,10 @@ static void sailfish_ofono_exit(void)
 	connman_technology_driver_unregister(&ofono_tech_driver);
 	connman_device_driver_unregister(&ofono_device_driver);
 	connman_network_driver_unregister(&ofono_network_driver);
+	connman_rtnl_unregister(&ofono_rtnl);
+
+	g_slist_free_full(rtnl_gw_list, free_rtnl_gw);
+	rtnl_gw_list = NULL;
 }
 
 CONNMAN_PLUGIN_DEFINE(sailfish_ofono, "Sailfish oFono plugin",
