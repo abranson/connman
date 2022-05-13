@@ -755,7 +755,8 @@ static void extract_ipv6_route(struct rtmsg *msg, int bytes, int *index,
 }
 
 static void process_newroute(unsigned char family, unsigned char scope,
-						struct rtmsg *msg, int bytes)
+						int metric, struct rtmsg *msg,
+						int bytes)
 {
 	GSList *list;
 	char dststr[INET6_ADDRSTRLEN], gatewaystr[INET6_ADDRSTRLEN];
@@ -806,26 +807,21 @@ static void process_newroute(unsigned char family, unsigned char scope,
 	for (list = rtnl_list; list; list = list->next) {
 		struct connman_rtnl *rtnl = list->data;
 
+		/* This listener does not handle gw added via ra */
+		if (msg->rtm_protocol == RTPROT_RA && !rtnl->handle_rtprot_ra)
+			continue;
+
 		if (rtnl->newgateway)
 			rtnl->newgateway(index, gatewaystr);
 
-		if (family == AF_INET6 && rtnl->newgateway6) {
-			/* This listener does not handle gw added via ra */
-			if (msg->rtm_protocol == RTPROT_RA &&
-							!rtnl->handle_rtprot_ra)
-				continue;
-
-			/*
-			 * TODO: convert msg to struct in6_rtmsg and
-			 * get route metric.
-			 */
-			rtnl->newgateway6(index, dststr, gatewaystr, 1024);
-		}
+		if (family == AF_INET6 && rtnl->newgateway6)
+			rtnl->newgateway6(index, dststr, gatewaystr, metric);
 	}
 }
 
 static void process_delroute(unsigned char family, unsigned char scope,
-						struct rtmsg *msg, int bytes)
+						int metric, struct rtmsg *msg,
+						int bytes)
 {
 	GSList *list;
 	char dststr[INET6_ADDRSTRLEN], gatewaystr[INET6_ADDRSTRLEN];
@@ -876,21 +872,15 @@ static void process_delroute(unsigned char family, unsigned char scope,
 	for (list = rtnl_list; list; list = list->next) {
 		struct connman_rtnl *rtnl = list->data;
 
+		/* This listener does not handle gw added via ra */
+		if (msg->rtm_protocol == RTPROT_RA && !rtnl->handle_rtprot_ra)
+				continue;
+
 		if (rtnl->delgateway)
 			rtnl->delgateway(index, gatewaystr);
 
-		if (family == AF_INET6 && rtnl->delgateway6) {
-			/* This listener does not handle gw added via ra */
-			if (msg->rtm_protocol == RTPROT_RA &&
-							!rtnl->handle_rtprot_ra)
-				continue;
-
-			/*
-			 * TODO: convert msg to struct in6_rtmsg and
-			 * get route metric.
-			 */
-			rtnl->delgateway6(index, dststr, gatewaystr, 1024);
-		}
+		if (family == AF_INET6 && rtnl->delgateway6)
+			rtnl->delgateway6(index, dststr, gatewaystr, metric);
 	}
 }
 
@@ -1178,26 +1168,52 @@ static bool is_route_rtmsg(struct rtmsg *msg)
 	return true;
 }
 
+static int get_route_metric(struct rtmsg *msg, int bytes)
+{
+	struct rtattr *attr;
+
+	for (attr = RTM_RTA(msg); RTA_OK(attr, bytes);
+					attr = RTA_NEXT(attr, bytes)) {
+		/* With IPv6 priority contains metric value */
+		if (attr->rta_type == RTA_PRIORITY)
+			return *((int *) RTA_DATA(attr));
+	}
+
+	return -1;
+}
+
 static void rtnl_newroute(struct nlmsghdr *hdr)
 {
 	struct rtmsg *msg = (struct rtmsg *) NLMSG_DATA(hdr);
+	int bytes = RTM_PAYLOAD(hdr);
+	int metric = -1;
 
 	rtnl_route(hdr);
 
-	if (is_route_rtmsg(msg))
-		process_newroute(msg->rtm_family, msg->rtm_scope,
-						msg, RTM_PAYLOAD(hdr));
+	if (is_route_rtmsg(msg)) {
+		if (msg->rtm_family == AF_INET6)
+			metric = get_route_metric(msg, bytes);
+
+		process_newroute(msg->rtm_family, msg->rtm_scope, metric,
+						msg, bytes);
+	}
 }
 
 static void rtnl_delroute(struct nlmsghdr *hdr)
 {
 	struct rtmsg *msg = (struct rtmsg *) NLMSG_DATA(hdr);
+	int bytes = RTM_PAYLOAD(hdr);
+	int metric = -1;
 
 	rtnl_route(hdr);
 
-	if (is_route_rtmsg(msg))
-		process_delroute(msg->rtm_family, msg->rtm_scope,
-						msg, RTM_PAYLOAD(hdr));
+	if (is_route_rtmsg(msg)) {
+		if (msg->rtm_family == AF_INET6)
+			metric = get_route_metric(msg, bytes);
+
+		process_delroute(msg->rtm_family, msg->rtm_scope, metric,
+						msg, bytes);
+	}
 }
 
 static void *rtnl_nd_opt_rdnss(struct nd_opt_hdr *opt, guint32 *lifetime,

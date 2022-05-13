@@ -22,6 +22,8 @@
 #ifndef __CONNMAN_RTNL_H
 #define __CONNMAN_RTNL_H
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
